@@ -16,6 +16,13 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 REDIS_URL = os.getenv("REDIS_URL", "")
 
+# Google API key (for image generation via Gemini)
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+
+# GitHub token (for self-healing — reading/writing own codebase)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "dab00gieman/Lisa")
+
 # Admin Telegram user IDs (comma-separated in env)
 ADMIN_IDS: List[int] = [
     int(uid.strip())

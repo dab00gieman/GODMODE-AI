@@ -58,6 +58,8 @@ from utils.memory import (
     remove_authorized_user_db,
 )
 from utils.openrouter import send_message, generate_image, list_available_models
+from utils.self_healer import attempt_heal
+from utils.google_images import generate_image_with_openrouter_fallback
 from utils.formatter import split_message, sanitize_input, truncate_with_ellipsis
 from utils.admin import (
     is_admin,
@@ -872,24 +874,62 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     response = f"_(⚠️ {fb_label} was unavailable — used {actual_label})_\n\n{response}"
 
     except Exception as e:
+        import traceback as _tb
+        tb_text = _tb.format_exc()
         logger.error(f"[{request_id}] Chat handler error: {e}", exc_info=True)
-        response = f"⚠️ Error: {str(e)[:200]}"
+        
+        # Attempt self-healing
+        heal_result = attempt_heal(str(e), tb_text)
+        if heal_result.get("healed"):
+            response = (
+                f"🔧 Self-healed! I found and fixed the error in {heal_result['filepath']}.\n"
+                f"Deploying now — try again in ~30 seconds.\n\n"
+                f"Fix: {heal_result.get('diagnosis', '')}"
+            )
+            logger.info(f"[{request_id}] Self-healing succeeded: {heal_result['message']}")
+        else:
+            response = f"⚠️ Error: {str(e)[:200]}"
+            if heal_result.get("filepath"):
+                logger.info(f"[{request_id}] Self-healing attempted but failed: {heal_result['message']}")
 
     # Add assistant response to history
     history.append({"role": "assistant", "content": response})
     save_session(chat_id, history)
 
     # Handle image responses (URLs)
-    if is_img and response.startswith("http"):
-        try:
-            await update.message.reply_photo(
-                photo=response,
-                caption=f"🎨 Generated with {get_model_label(model)}"
-            )
-        except Exception:
-            for chunk in split_message(response):
-                await update.message.reply_text(chunk, parse_mode="Markdown")
-        return
+    if is_img:
+        # Handle URL-based images (OpenRouter, etc.)
+        if response.startswith("http"):
+            try:
+                await update.message.reply_photo(
+                    photo=response,
+                    caption=f"🎨 Generated with {get_model_label(model)}"
+                )
+            except Exception:
+                for chunk in split_message(response):
+                    await update.message.reply_text(chunk, parse_mode="Markdown")
+            return
+        
+        # Handle base64 image data from Google Gemini
+        if response.startswith("data:image"):
+            try:
+                import base64 as _b64
+                import io as _io
+                # Extract base64 data from data URI
+                header, b64_data = response.split(",", 1)
+                image_bytes = _b64.b64decode(b64_data)
+                photo_stream = _io.BytesIO(image_bytes)
+                photo_stream.name = "generated.png"
+                await update.message.reply_photo(
+                    photo=photo_stream,
+                    caption=f"🎨 Generated with Google Gemini"
+                )
+            except Exception as e:
+                logger.error(f"Failed to send base64 image: {e}")
+                await update.message.reply_text(
+                    f"🎨 Image generated but could not display. Error: {str(e)[:100]}"
+                )
+            return
 
     # Send text response (with smart splitting)
     for chunk in split_message(response):
@@ -1013,7 +1053,36 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     , parse_mode="Markdown")
 
 # Admin
+async def fix_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: manually trigger self-healing for the last error."""
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /fix <error_message>\n\n"
+            "Or just /fix <filepath> to re-read and diagnose a file.\n"
+            "Example: /fix name '_check_auth' is not defined"
+        )
+        return
+    error_text = " ".join(context.args)
+    await update.message.reply_text("🔧 Diagnosing and attempting fix...")
+    result = attempt_heal(error_text)
+    if result.get("healed"):
+        await update.message.reply_text(
+            f"✅ Fixed {result['filepath']} (commit {result['commit_sha']})\n"
+            f"Vercel will redeploy automatically. Try again in ~30s.\n\n"
+            f"Diagnosis: {result.get('diagnosis', '')}"
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ Could not auto-fix.\n"
+            f"File: {result.get('filepath', 'unknown')}\n"
+            f"Reason: {result.get('message', 'unknown')}"
+        )
+
+
 bot_app.add_handler(CommandHandler("admin", admin_command))
+bot_app.add_handler(CommandHandler("fix", fix_command))
 bot_app.add_handler(CommandHandler("authorize", authorize_command))
 bot_app.add_handler(CommandHandler("revoke", revoke_command))
 bot_app.add_handler(CommandHandler("users", users_command))
