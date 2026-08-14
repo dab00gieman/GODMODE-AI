@@ -851,24 +851,6 @@ class handler(BaseHTTPRequestHandler):
             
             update = Update.de_json(data, bot_app.bot)
 
-            _process_error = None
-            
-            # Wrap process_update to capture any handler errors
-            original_error_handler = None
-            captured_error = []
-            
-            async def _capturing_error_handler(update_obj, context):
-                captured_error.append(str(context.error))
-                logger.error(f"Handler error: {context.error}", exc_info=True)
-                if update_obj and isinstance(update_obj, Update) and update_obj.effective_chat:
-                    try:
-                        err_msg = str(context.error)[:300]
-                        await update_obj.effective_chat.send_message(
-                            f"⚠️ Error: {err_msg}"
-                        )
-                    except Exception:
-                        pass
-            
             loop = asyncio.new_event_loop()
             try:
                 global _bot_initialized
@@ -876,24 +858,11 @@ class handler(BaseHTTPRequestHandler):
                     loop.run_until_complete(bot_app.initialize())
                     _bot_initialized = True
                     logger.info("Bot app initialized for serverless")
-                
-                # Replace error handler temporarily to capture errors
-                for key in list(bot_app.error_handlers.keys()):
-                    original_error_handler = bot_app.error_handlers[key]
-                    bot_app.error_handlers[key] = [_capturing_error_handler]
-                
                 loop.run_until_complete(bot_app.process_update(update))
             finally:
-                # Restore original error handler
-                if original_error_handler:
-                    for key in list(bot_app.error_handlers.keys()):
-                        bot_app.error_handlers[key] = original_error_handler
                 loop.close()
 
-            if captured_error:
-                self._respond(200, {"status": "error", "error": captured_error[0]})
-            else:
-                self._respond(200, {"status": "ok"})
+            self._respond(200, {"status": "ok"})
 
         except json.JSONDecodeError:
             self._respond(400, {"error": "Invalid JSON"})
