@@ -257,6 +257,48 @@ def set_prefs(chat_id: int, **kwargs) -> bool:
         return False
 
 
+# ──────────────────────────── AUTHORIZED USERS ────────────────────────────
+
+def get_authorized_users() -> list:
+    """Get all authorized user IDs from Firebase."""
+    db = get_db()
+    if not db:
+        return []
+    try:
+        docs = db.collection("authorized_users").stream()
+        return [int(doc.id) for doc in docs]
+    except Exception as e:
+        logger.error(f"Error getting authorized users: {e}")
+        return []
+
+def add_authorized_user_db(user_id: int) -> bool:
+    """Add an authorized user to Firebase."""
+    db = get_db()
+    if not db:
+        return False
+    try:
+        db.collection("authorized_users").document(str(user_id)).set({
+            "user_id": user_id,
+            "added_at": datetime.utcnow().isoformat(),
+        })
+        return True
+    except Exception as e:
+        logger.error(f"Error adding authorized user {user_id}: {e}")
+        return False
+
+def remove_authorized_user_db(user_id: int) -> bool:
+    """Remove an authorized user from Firebase."""
+    db = get_db()
+    if not db:
+        return False
+    try:
+        db.collection("authorized_users").document(str(user_id)).delete()
+        return True
+    except Exception as e:
+        logger.error(f"Error removing authorized user {user_id}: {e}")
+        return False
+
+
 # ──────────────────────────── USAGE STATS ────────────────────────────
 
 def record_usage(chat_id: int, model: str, tokens: int, msg_type: str = "text") -> bool:

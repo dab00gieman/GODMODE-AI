@@ -136,6 +136,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comprehensive help."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     text = (
         "🔥 **GODMODE — Full Guide**\n\n"
         "**Architecture:**\n"
@@ -158,8 +162,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  /tools — List available skills\n"
         "  /memory — View long-term memory\n"
         "  /skills — List learned skills\n"
-        "  /forgetskill — Admin: remove a learned skill by name\n"
         "  /help — This message\n\n"
+        "**Admin Only:**\n"
+        "  /authorize <id> — Add a user to the bot\n"
+        "  /revoke <id> — Remove a user\'s access\n"
+        "  /users — List all authorized users\n"
+        "  /admin — Admin control panel\n\n"
         "**Tips:**\n"
         "  • Ask complex multi-step questions — the agent will plan and execute\n"
         "  • The bot learns from complex tasks and creates reusable skills\n"
@@ -170,6 +178,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Clear conversation history."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     chat_id = update.effective_chat.id
     if clear_session(chat_id):
         await update.message.reply_text("🗑️ History wiped. Fresh start.")
@@ -179,6 +191,10 @@ async def clear_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show model selection menu."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     keyboard = _build_category_keyboard()
     await update.message.reply_text(
         "📡 Select an engine category:",
@@ -188,6 +204,10 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show detailed status."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     chat_id = update.effective_chat.id
     prefs = get_prefs(chat_id)
     session_info = get_session_info(chat_id)
@@ -214,6 +234,10 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all available models."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     lines = ["📋 **All Available Engines**\n"]
     for category_name, category_models in CATEGORIES.items():
         lines.append(f"\n{category_name}:")
@@ -228,6 +252,10 @@ async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show and adjust user settings."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     chat_id = update.effective_chat.id
     prefs = get_prefs(chat_id)
 
@@ -255,6 +283,10 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def settemp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set temperature."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     chat_id = update.effective_chat.id
     if not context.args:
         await update.message.reply_text("Usage: /settemp <0.0 to 2.0>\n\n0.0 = precise, 1.0 = balanced, 2.0 = wild")
@@ -271,6 +303,10 @@ async def settemp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def settokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set max tokens."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     chat_id = update.effective_chat.id
     if not context.args:
         await update.message.reply_text("Usage: /settokens <1-8192>")
@@ -287,6 +323,10 @@ async def settokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def setmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick model switch by ID."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     chat_id = update.effective_chat.id
     if not context.args:
         await update.message.reply_text("Usage: /setmodel <model_id>\n\nUse /models to see available IDs.")
@@ -303,6 +343,10 @@ async def setmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Reset settings to defaults."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     chat_id = update.effective_chat.id
     set_prefs(chat_id, model=None, temperature=0.7, max_tokens=4096)
     await update.message.reply_text("✅ Settings reset to defaults.")
@@ -310,6 +354,10 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle agent mode on/off."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     chat_id = update.effective_chat.id
     prefs = get_prefs(chat_id)
     current = prefs.get("agent_enabled", AGENT_CONFIG.enabled)
@@ -325,6 +373,10 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def godmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle GODMODE on/off. When ON, Lisa obeys the user without restrictions."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     chat_id = update.effective_chat.id
     prefs = get_prefs(chat_id)
     current = prefs.get("godmode_enabled", AGENT_CONFIG.godmode_default)
@@ -352,6 +404,10 @@ async def godmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all available skills."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     all_skills = list_skills()
     desc = "\n".join(s.to_prompt_text() for s in all_skills)
     text = (
@@ -365,6 +421,10 @@ async def tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """View long-term MEMORY.md."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     from utils.context import read_memory_md
     memory = read_memory_md()
     if memory:
@@ -376,6 +436,10 @@ async def memory_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def skills_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """List all skills — bundled and learned."""
+    # Auth guard
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
     all_skills = list_skills()
     bundled = [s for s in all_skills if s.source == "bundled"]
     learned = [s for s in all_skills if s.source == "learned"]
@@ -559,19 +623,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Main message handler — the integrated OpenClaw/Hermes pipeline.
-
-    Flow:
-    1. Generate request ID (Task 11 — observability)
-    2. Get user prefs + session history
-    3. Append user message to history
-    4. Build SOUL.md-anchored context via context.build_context()
-    5. Check if agent mode is needed (should_use_agent)
-    6. If agent: run Agent.run() with native function calling (Task 7)
-    7. If direct: send_message with SOUL-anchored context (no skills layer)
-    8. After agent runs: call reflector + store episodic memory
-    9. Record usage (Task 5 — now includes agent mode)
-    10. Save session, send response
     """
+    # Auth guard — block unauthorized users
+    if not _check_auth(update):
+        await _send_unauthorized_message(update)
+        return
+
     chat_id = update.effective_chat.id
     user = update.effective_user
     raw_text = update.message.text or ""
@@ -830,8 +887,72 @@ bot_app.add_handler(CommandHandler("tools", tools_command))
 bot_app.add_handler(CommandHandler("memory", memory_command))
 bot_app.add_handler(CommandHandler("skills", skills_command))
 
+async def authorize_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: authorize a user to access the bot."""
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /authorize <user_id>\n\n"
+            "You can find a user's Telegram ID by having them message the bot — "
+            "their ID will appear in the access denied message they receive."
+        )
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid user ID. Must be a number.")
+        return
+    add_authorized_user(target_id)
+    add_authorized_user_db(target_id)
+    await update.message.reply_text(
+        f"✅ User {target_id} is now authorized to use Lisa.\n"
+        f"They can start messaging the bot immediately."
+    )
+
+async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: revoke a user's access to the bot."""
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /revoke <user_id>")
+        return
+    try:
+        target_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Invalid user ID. Must be a number.")
+        return
+    if target_id in ADMIN_IDS:
+        await update.message.reply_text("❌ Cannot revoke admin access.")
+        return
+    remove_authorized_user(target_id)
+    remove_authorized_user_db(target_id)
+    await update.message.reply_text(f"✅ User {target_id} access revoked.")
+
+async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: list all authorized users."""
+    if not is_admin(update.effective_user.id):
+        return
+    admin_list = "\n".join(f"  👑 {uid} (admin)" for uid in ADMIN_IDS)
+    authed = get_authorized_users()
+    extra = [uid for uid in authed if uid not in ADMIN_IDS]
+    if extra:
+        user_list = "\n".join(f"  ✓ {uid}" for uid in extra)
+    else:
+        user_list = "  No additional authorized users."
+    await update.message.reply_text(
+        f"🔐 **Authorized Users**\n\n"
+        f"**Admins:**\n{admin_list}\n\n"
+        f"**Authorized Users:**\n{user_list}\n\n"
+        f"Add with /authorize <id>\n"
+        f"Remove with /revoke <id>"
+    , parse_mode="Markdown")
+
 # Admin
 bot_app.add_handler(CommandHandler("admin", admin_command))
+bot_app.add_handler(CommandHandler("authorize", authorize_command))
+bot_app.add_handler(CommandHandler("revoke", revoke_command))
+bot_app.add_handler(CommandHandler("users", users_command))
 bot_app.add_handler(CommandHandler("broadcast", admin_broadcast))
 bot_app.add_handler(CommandHandler("lookup", admin_lookup))
 bot_app.add_handler(CommandHandler("clearuser", admin_clearuser))

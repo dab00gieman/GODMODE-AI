@@ -23,6 +23,30 @@ ADMIN_IDS: List[int] = [
     if uid.strip().isdigit()
 ]
 
+# Additional authorized users (managed at runtime via /authorize command)
+# These are stored in Firebase but cached in-memory for fast lookups
+_authorized_cache: set = set()
+
+def get_authorized_ids() -> set:
+    """Get all authorized user IDs (admins + approved users)."""
+    return set(ADMIN_IDS) | _authorized_cache
+
+def add_authorized_user(user_id: int) -> bool:
+    """Add a user to the authorized list."""
+    _authorized_cache.add(user_id)
+    return True
+
+def remove_authorized_user(user_id: int) -> bool:
+    """Remove a user from the authorized list (admins can't be removed)."""
+    if user_id in ADMIN_IDS:
+        return False
+    _authorized_cache.discard(user_id)
+    return True
+
+def is_authorized(user_id: int) -> bool:
+    """Check if a user is authorized to use the bot."""
+    return user_id in get_authorized_ids()
+
 # ──────────────────────────── RATE LIMITS ────────────────────────────
 
 @dataclass
