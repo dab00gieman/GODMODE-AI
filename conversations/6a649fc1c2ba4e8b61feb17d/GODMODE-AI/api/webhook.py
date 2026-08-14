@@ -84,7 +84,21 @@ bot_app: Application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 # ──────────────────────────── SERVERLESS INIT ────────────────────────────
 
+_event_loop = None
 _bot_initialized = False
+
+def _get_event_loop():
+    """Get or create a persistent event loop for serverless warm starts.
+    
+    PTB v21's internal httpx client binds to the event loop it was initialized in.
+    If we close the loop and create a new one, the bot's HTTP connections are dead
+    and we get 'Event loop is closed' errors. So we keep a single loop alive.
+    """
+    global _event_loop
+    if _event_loop is None or _event_loop.is_closed():
+        _event_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_event_loop)
+    return _event_loop
 
 
 # ──────────────────────────── COMMANDS ────────────────────────────
@@ -851,16 +865,13 @@ class handler(BaseHTTPRequestHandler):
             
             update = Update.de_json(data, bot_app.bot)
 
-            loop = asyncio.new_event_loop()
-            try:
-                global _bot_initialized
-                if not _bot_initialized:
-                    loop.run_until_complete(bot_app.initialize())
-                    _bot_initialized = True
-                    logger.info("Bot app initialized for serverless")
-                loop.run_until_complete(bot_app.process_update(update))
-            finally:
-                loop.close()
+            loop = _get_event_loop()
+            global _bot_initialized
+            if not _bot_initialized:
+                loop.run_until_complete(bot_app.initialize())
+                _bot_initialized = True
+                logger.info("Bot app initialized for serverless")
+            loop.run_until_complete(bot_app.process_update(update))
 
             self._respond(200, {"status": "ok"})
 
