@@ -1,0 +1,221 @@
+# Tinda Repo — Round 2 Fix Instructions
+
+Good progress on the round-1 fixes — those are confirmed working (UserType enum,
+Firestore getters returning `id`, `listJobs` filtering, middleware file/export
+naming, AuthContext consolidation, login page, dependency cleanup all check out).
+
+This round found new bugs — some are follow-through gaps from the round-1
+fixes, others were introduced by the large feature expansion (resumes, mock
+interviews, offers, referrals, notifications, company reviews, candidate
+notes, etc.). Fix in this order.
+
+---
+
+## 1. CRITICAL: `auth()` still called with no arguments in 7 places
+
+`src/lib/auth.ts`'s `auth()` function requires a `Request` (or cookies object)
+argument to extract the session token — it returns `null` immediately if
+nothing is passed. But these call sites were never updated to pass `request`:
+
+- `src/app/api/jobs/route.ts` — line 36 (`POST`)
+- `src/app/api/jobs/[id]/route.ts` — line 37 (`PUT`) and line 88 (`DELETE`)
+- `src/app/api/profiles/employer/route.ts` — line 22 (`GET`) and line 31 (`PUT`)
+- `src/app/api/profiles/candidate/route.ts` — line 27 (`GET`) and line 36 (`PUT`)
+
+**Fix:** Change every `await auth()` in these files to `await auth(request)`,
+matching the pattern already used correctly in `src/app/api/swipes/route.ts`
+and `src/app/api/matching/route.ts`. Note: the `GET` handlers in the profile
+routes currently don't even accept a `request` parameter — add it to the
+function signature (`export async function GET(request: Request)`).
+
+After fixing, manually verify: log in as an employer, create a job, edit it,
+delete it, and load/save your employer + candidate profile pages. All of
+these are currently broken (silently return 401).
+
+---
+
+## 2. CRITICAL: `firestore.rules` has broken brace nesting — will fail to deploy
+
+Run `firebase deploy --only firestore:rules` (or open the file in the Firebase
+console rules editor) and you'll see it rejected. The structural problem:
+after the `jobAlerts` match block, the `/databases/{database}/documents` block
+gets closed one brace too early. Then `resumes` is declared directly under
+`service cloud.firestore` (invalid — all `match` blocks must live inside the
+`documents` block). Then `service cloud.firestore` itself gets closed early
+too, and `mockInterviews`, `companyReviews`, `offers`, `candidateNotes`, and
+`referrals` are declared completely outside any `service` block.
+
+**Fix:** Rewrite `firestore.rules` so there is exactly one
+`service cloud.firestore { match /databases/{database}/documents { ... } }`
+wrapper, with every collection's `match` block — `users`, `candidateProfiles`,
+`employerProfiles`, `jobs`, `swipes`, `matches`, `conversations`, `messages`,
+`notifications`, `badges`, `swipeAnalytics`, `interviews`, `assessments`,
+`assessmentResults`, `savedJobs`, `jobAlerts`, `resumes`, `mockInterviews`,
+`companyReviews`, `offers`, `candidateNotes`, `referrals` — nested inside it.
+Validate brace balance before committing (or just run it through the Firebase
+emulator/console, which will reject malformed rules immediately).
+
+---
+
+## 3. CRITICAL: Employer profile ID vs. employer user ID confusion
+
+This is a data-modeling bug spanning multiple files. `employerProfiles` now
+has an auto-generated Firestore doc ID (separate from the employer's actual
+user/auth ID), looked up via a `userId` field. `jobs.employerId` is set to
+this profile doc ID (`employerProfile.id`) — that part is internally
+consistent for job ownership. The bug is everywhere else this ID gets
+confused with the employer's real user ID:
+
+**3a. `getEmployerProfile(job.employerId)` always returns `null`**
+`getEmployerProfile()` queries `where('userId', '==', ...)`, but
+`job.employerId` holds the *profile doc ID*, not a `userId`. Since profile
+doc IDs are auto-generated and never equal any `userId` value, this query
+never matches. Two call sites are broken because of this:
+- `src/app/api/swipes/route.ts` line ~150 (inside the POST handler, the
+  "candidate swipes a job → check if employer already liked them → create
+  match" flow) — this flow can currently never fire.
+- `src/app/api/cover-letter/route.ts` line ~28
+
+**Fix:** Both call sites should use `getEmployerProfileById(job.employerId)`
+instead — this function already exists in `src/lib/firebase.ts` but is
+currently unused anywhere in the codebase. Import and use it.
+
+**3b. Matches/conversations/notifications are filed under the wrong ID for employers**
+In `src/app/api/swipes/route.ts`, when a match is created, these all use
+`employerProfile.id` (the profile doc ID) where they should use the
+employer's actual user ID (the same `user.id` used for the candidate side):
+- `createMatch({ ..., employerId: employerProfile.id })`
+- `createConversation({ ..., participant2Id: employerProfile.id })`
+- `createNotification({ userId: employerProfile.id, ... })` (both
+  occurrences, in the "candidate likes job" and "employer likes candidate"
+  branches)
+
+But `listNotifications(session.user.id)` (in `src/app/api/notifications/route.ts`)
+and the Firestore rules for `matches`/`conversations` all check against the
+real authenticated user's UID. Since nothing is ever created under that UID
+for the employer side, **an employer will never see their own match
+notifications or conversations** — they're silently filed under an ID nobody
+queries by.
+
+**Fix:** Decide on one consistent convention. Recommended: `matches`,
+`conversations`, and `notifications` should always store the real user
+ID (Firebase Auth UID) for both parties, never the `employerProfile` doc ID.
+Only `jobs.employerId` needs to reference the profile doc ID (since that's
+what job-ownership checks compare against). Audit every `createMatch`,
+`createConversation`, and `createNotification` call in
+`src/app/api/swipes/route.ts` and update them to pass `user.id` (for the
+current employer) rather than `employerProfile.id`. Also double check
+`src/app/api/chat/[conversationId]/route.ts` and any other file that reads
+`participant1Id`/`participant2Id`/`employerId` on these collections for the
+same mix-up.
+
+---
+
+## 4. Operator-precedence bug breaks the match counter
+
+`src/app/api/swipes/route.ts`, inside the POST handler:
+```ts
+await updateUserFields(user.id, { totalMatches: (await getUserById(user.id))?.totalMatches || 0 + 1 });
+```
+`+` binds tighter than `||` in JS, so this evaluates as
+`totalMatches || (0 + 1)`, i.e. `totalMatches || 1`. If the current value is
+falsy (`0` or `undefined`), it always becomes exactly `1`. If it's already a
+truthy number, it never increments at all.
+
+**Fix:**
+```ts
+const currentUser = await getUserById(user.id);
+await updateUserFields(user.id, { totalMatches: (currentUser?.totalMatches || 0) + 1 });
+```
+
+---
+
+## 5. Missing Firestore composite indexes for new collections
+
+`firestore.indexes.json` only defines indexes for `jobs`, `swipes`, `matches`,
+and `users`. But `src/lib/firebase.ts` now runs compound queries (multiple
+`.where()` calls and/or `.where().orderBy()` combos) against several
+collections with no matching index defined:
+- `notifications` — `.where('userId','==',...).orderBy('createdAt','desc')`
+- `offers` — `.where(field,'==',userId).orderBy('createdAt','desc')`
+- `referrals` — `.where('referrerId','==',...).orderBy('createdAt','desc')`
+- `candidateNotes` — `.where('employerId','==',...).where('candidateId','==',...).orderBy('createdAt','desc')`
+- `companyReviews` — `.where('employerId','==',...).orderBy('createdAt','desc')`
+- `mockInterviews` — `.where('candidateId','==',...).orderBy('createdAt','desc')`
+- `messages` (in `markMessagesRead`) — `.where('conversationId','==',...).where('senderId','!=',...).where('read','==',false)` — note this combines a `!=` filter with equality filters, which has extra Firestore index requirements
+
+Each of these will throw a `FAILED_PRECONDITION: The query requires an index`
+runtime error the first time it executes in production (Firestore normally
+gives you a console link to auto-create the missing index when this happens
+in development — but that's not something you want surfacing to real users).
+
+**Fix:** Add composite index entries to `firestore.indexes.json` for each
+collection/query pattern above. Test each new feature (notifications page,
+offers, referrals, candidate notes, company reviews, mock interviews, marking
+a chat as read) against the Firestore emulator or a dev project to catch any
+that still error, then run `firebase deploy --only firestore:indexes`.
+
+---
+
+## 6. `firebase-admin` in Edge-runtime middleware
+
+`src/middleware.ts` imports `auth` from `@/lib/auth`, which imports from
+`./firebase/admin`, which initializes `firebase-admin`. Next.js middleware
+runs on the **Edge runtime** by default, and `firebase-admin` depends on
+Node.js-only APIs — this combination is a known source of build/runtime
+failures ("A Node.js API is used which is not supported in the Edge Runtime").
+
+**Fix:** Either:
+- (a) Opt the middleware into the Node.js runtime, if your Next.js version
+  supports it (check `export const config = { runtime: 'nodejs' }` support
+  for middleware in Next 16 — this was stabilized in recent versions), or
+- (b) Do lightweight cookie-presence checking only in middleware (no token
+  verification) and rely on the API routes' own `auth(request)` calls (which
+  run in the Node.js runtime already) to do full token verification.
+  Middleware would just check "does a `__session` cookie exist" for the
+  redirect logic, not fully verify it.
+
+Verify by actually running `npm run build` and `npm run dev`, then hitting a
+protected route, to confirm middleware doesn't throw at runtime.
+
+---
+
+## 7. Minor: possible login redirect race condition
+
+In `src/app/(auth)/login/page.tsx`, after a successful
+`signInWithEmailAndPassword`, `router.push("/dashboard")` fires immediately.
+But the `__session` cookie is set asynchronously inside
+`AuthContext`'s `onAuthStateChanged` listener (it awaits `getIdToken()`
+first). If middleware evaluates the `/dashboard` request before that cookie
+is written, the user gets bounced back to `/login` right after a successful
+login.
+
+**Fix:** Either await the cookie being set before navigating (e.g., expose a
+promise/flag from `AuthContext` that resolves once the cookie sync completes
+after sign-in), or have the login page get the ID token and set the cookie
+itself immediately after `signInWithEmailAndPassword` succeeds, before
+calling `router.push`.
+
+---
+
+## Verification checklist
+
+1. Log in as an employer: create, edit, and delete a job. Confirm none of
+   these return 401.
+2. Load and save both the candidate and employer profile edit pages.
+3. `firebase deploy --only firestore:rules --dry-run` (or paste into the
+   Firebase console rules editor) — confirm it's accepted.
+4. As a candidate, swipe "like" on a job whose employer has already liked
+   you back — confirm a match + conversation + notification is created and
+   that **both** parties (not just the candidate) can see it.
+5. Swipe several matches and confirm `totalMatches` on the user doc actually
+   increments each time, not just jumping to 1.
+6. Exercise every new feature at least once against a real (or emulated)
+   Firestore project — notifications, offers, referrals, candidate notes,
+   company reviews, mock interviews, marking a chat read — and confirm none
+   throw a "query requires an index" error.
+7. Run `npm run build` and `npm run dev`, then hit any protected route, to
+   confirm middleware doesn't crash due to `firebase-admin` on the Edge
+   runtime.
+8. Log in with email/password and confirm you land on `/dashboard` reliably,
+   without being bounced back to `/login`.

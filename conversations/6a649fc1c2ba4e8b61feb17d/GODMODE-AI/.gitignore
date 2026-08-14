@@ -1,0 +1,41 @@
+# Environment
+.env
+.env.local
+.env.*.local
+.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Vercel
+.vercel/
+
+# Logs
+*.log
+*.pid
+*.seed
+*.pid.lock
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+incoming_files/
+*.bin
+conversations/6a649fc1c2ba4e8b61feb17d/extracted/
+incoming_files/

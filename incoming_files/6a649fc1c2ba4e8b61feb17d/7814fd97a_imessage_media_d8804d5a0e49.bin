@@ -1,0 +1,323 @@
+# Tinda Repo — Full Bug Audit & Fix Instructions
+
+Context: this app is mid-migration from NextAuth to Firebase Auth. The migration
+is incomplete and has left the app in a broken state. Below is every issue found,
+grouped by severity, with exact file paths. Fix them in the order listed —
+later items depend on earlier ones being fixed correctly.
+
+---
+
+## GROUP 1 — CRITICAL: App will not build or will crash immediately
+
+### 1.1 `auth()` is called as a function everywhere, but it's now a plain object
+`src/lib/auth.ts` exports:
+```ts
+export const auth = { getAuthenticatedUser }
+```
+This is an object literal, not a callable function. But every one of these files
+calls `await auth()`:
+- `src/app/api/swipes/route.ts` (GET and POST)
+- `src/app/api/jobs/route.ts` (POST)
+- `src/app/api/jobs/[id]/route.ts` (PUT and DELETE)
+- `src/app/api/profiles/candidate/route.ts` (GET and PUT)
+- `src/app/api/profiles/employer/route.ts` (GET and PUT)
+
+**Fix:** Decide on one auth strategy consistently (Firebase Auth, since that's
+what the client code uses). Rewrite `src/lib/auth.ts` to export a real
+`auth()` function that:
+- Reads the session/ID token (e.g., from the `__session` cookie or an
+  `Authorization` header),
+- Verifies it via `adminAuth.verifyIdToken(...)`,
+- Returns an object shaped like `{ user: { id, userType, ... } }` so all the
+  `(session as any)?.user` call sites keep working without rewriting every route.
+
+Also delete the dummy `GET`/`POST` exports from `src/lib/auth.ts` and remove
+`src/app/api/auth/[...nextauth]/route.ts` entirely (NextAuth is not in use).
+
+---
+
+### 1.2 `UserType` is a TypeScript type, not a runtime enum/object
+`src/lib/firebase.ts`:
+```ts
+export type UserType = 'candidate' | 'employer'
+```
+This is a type alias — it has no runtime existence. But code treats it like an
+enum with property access (`UserType.Candidate`, `UserType.Employer`) in:
+- `src/app/api/swipes/route.ts`
+- `src/app/api/jobs/route.ts`
+- `src/app/api/jobs/[id]/route.ts`
+
+**Fix:** Replace the type alias with an actual runtime enum, e.g.:
+```ts
+export enum UserType {
+  Candidate = 'Candidate',
+  Employer = 'Employer',
+}
+```
+Use `PascalCase` values (`'Candidate'`/`'Employer'`) — see Group 2.1 below for
+why casing matters. Update `src/types/next-auth.d.ts` to import this enum
+correctly (it currently references the broken type-only version).
+
+---
+
+### 1.3 Missing module `@/lib/validations`
+These files import from `@/lib/validations`, which does not exist anywhere in
+the repo:
+- `tinda.ts` (root)
+- `user.ts` (root)
+- `src/app/tinda.ts`
+- `src/app/user.ts`
+
+The actual schemas (`userProfileSchema`, `tindaDocSchema`) live in
+`src/app/index.ts` instead.
+
+**Fix:** Either create `src/lib/validations.ts` and move/export the schemas
+from `src/app/index.ts` into it, or update the four importing files to point
+to the correct path. Given the naming convention of the rest of the codebase
+(`src/lib/*.ts` for shared logic), moving the schemas into
+`src/lib/validations.ts` is the cleaner fix.
+
+---
+
+### 1.4 Two conflicting Next.js config files
+Both `next.config.js` and `next.config.mjs` exist simultaneously with
+**different** `images.remotePatterns`:
+- `.mjs` allows `images.pexels.com` and `lh3.googleusercontent.com`
+- `.js` allows `firebasestorage.googleapis.com`
+
+Having both is unsupported/ambiguous, and since actual uploaded profile
+pictures/logos live in Firebase Storage (per `storage.rules`), whichever
+config "wins" may break `next/image` for Firebase-hosted images.
+
+**Fix:** Delete one of the two files and merge all needed hostnames
+(`images.pexels.com`, `lh3.googleusercontent.com`,
+`firebasestorage.googleapis.com`) into the single remaining config file.
+
+---
+
+## GROUP 2 — Data / logic bugs (compiles, but behaves incorrectly)
+
+### 2.1 `userType` casing mismatch between schema and query
+Signup/registration code (`signup-form.tsx`, `api/auth/register/route.ts`,
+`candidateSchema`, `employerSchema`, `jobSchema`) all use **PascalCase**
+values: `"Candidate"` / `"Employer"`.
+
+But `src/lib/firebase.ts` → `listCandidateUsers()` queries:
+```ts
+.where('userType', '==', 'candidate')
+```
+lowercase. This means **the employer swipe feed will always return zero
+candidates**, since no stored user actually has `userType == 'candidate'`.
+
+**Fix:** Standardize on one casing everywhere (recommend PascalCase to match
+the enum in fix 1.2) and update the Firestore query in `listCandidateUsers()`
+to match.
+
+---
+
+### 2.2 Firestore getter functions silently drop the document `id`
+In `src/lib/firebase.ts`, these functions return `doc.data()` with **no `id`
+field attached**:
+- `getUserByEmail`
+- `getUserById`
+- `getCandidateProfile`
+- `getEmployerProfile`
+
+Only `getJobById` correctly returns `{ id: doc.id, ...doc.data() }`.
+
+This causes real bugs downstream:
+- `src/app/api/swipes/route.ts`: `getUserById(employerProfile.userId)` →
+  `employerUser.id` is `undefined` → `listSwipesBySwiper(employerUser.id)` and
+  `createMatch({ ..., employerId: employerUser.id })` both use `undefined`.
+- `src/app/api/jobs/route.ts` and `jobs/[id]/route.ts`:
+  `getEmployerProfile(user.id)` → `employerProfile.id` is `undefined` →
+  jobs get created with `employerId: undefined`, and later ownership checks
+  (`existingJob.employerId !== employerProfile.id`) compare `undefined` to
+  `undefined`, which can spuriously pass or fail depending on data state.
+
+**Fix:** Update every getter in `src/lib/firebase.ts` to return
+`{ id: doc.id, ...doc.data() }` consistently, matching the pattern already
+used in `getJobById`. Then audit call sites to make sure `.id` usage lines
+up correctly (e.g., confirm whether the document ID should be the Firestore
+doc ID or the `userId` field — for profile collections doc ID *is* the
+`userId`, so double check nothing double-relies on both).
+
+---
+
+### 2.3 `listJobs()` ignores its filter argument entirely
+`src/app/api/jobs/route.ts` (GET) does:
+```ts
+const jobs = await listJobs(filter);
+```
+But in `src/lib/firebase.ts`:
+```ts
+export async function listJobs() {
+  const snap = await adminDb.collection('jobs').limit(20).get()
+  return snap.docs.map(d => ({ id: d.id, ...d.data() }))
+}
+```
+`listJobs` takes **no parameters** — the `employerId` filter is silently
+dropped. This is why `src/app/employer/jobs/page.tsx` (which calls
+`fetch("/api/jobs")` without even passing `employerId`) ends up showing
+**every employer's job postings**, not just the current employer's.
+
+**Fix:**
+1. Update `listJobs` in `src/lib/firebase.ts` to accept an optional filter
+   object and apply a `.where('employerId', '==', filter.employerId)` clause
+   when provided.
+2. Update `src/app/employer/jobs/page.tsx` to pass the current employer's ID
+   as a query param when fetching `/api/jobs`.
+
+---
+
+### 2.4 Login page references undefined Google auth symbols
+`src/app/(auth)/login/page.tsx` calls:
+```ts
+const provider = new GoogleAuthProvider();
+await signInWithPopup(auth, provider);
+```
+but only imports `signInWithEmailAndPassword` from `firebase/auth`. Neither
+`GoogleAuthProvider` nor `signInWithPopup` is imported anywhere in the file —
+this throws a reference error the moment "Sign in with Google" is clicked.
+
+**Fix:** Either import both symbols from `firebase/auth` directly, or (better,
+for consistency) just call `signInWithGoogle()` from the `useAuth()` context,
+the same way `signup-form.tsx` does — see 2.5 below for why that also needs
+fixing.
+
+---
+
+### 2.5 Live `AuthContext` is missing `signInWithGoogle`/`logout`, but pages call them
+There are two versions of `AuthContext`:
+- `AuthContext.tsx` (repo root) — full version with `logout`,
+  `signInWithGoogle`, and syncs a `__session` cookie for middleware.
+- `src/context/AuthContext.tsx` — stripped version exposing only
+  `{ user, loading }`.
+
+All imports use `@/context/AuthContext`, which (per `tsconfig.json` path
+aliasing `@/* → ./src/*`) resolves to the **stripped version**. But:
+- `src/app/(auth)/signup/signup-form.tsx` destructures
+  `const { signInWithGoogle } = useAuth();` and calls it — `undefined()` throws.
+- `src/app/(auth)/login/page.tsx` needs the same for Google sign-in.
+- Nothing anywhere calls `logout()` from the live context, meaning there's
+  currently no way to sign out through the UI.
+
+**Fix:** Delete the root-level `AuthContext.tsx` (it's a stray duplicate) and
+merge its `logout`/`signInWithGoogle`/cookie-sync logic into
+`src/context/AuthContext.tsx`, which is the one actually being imported.
+
+---
+
+### 2.6 Middleware file has the wrong filename AND wrong export name
+`src/proxy.ts` implements route-guarding (redirect `/dashboard` → `/login` if
+no session, etc.) using a `__session` cookie. But:
+1. Next.js only picks up middleware from a file literally named
+   `middleware.ts` (at the project root or `src/`) — as `proxy.ts`, **this
+   code never runs at all.**
+2. Even if renamed, Next.js requires the exported function to be named
+   `middleware` (or be the default export). The file exports `proxy`, not
+   `middleware` — so simply renaming the file isn't enough.
+3. Even after fixing both of the above, the `__session` cookie it depends on
+   is only ever set inside the orphaned root `AuthContext.tsx` (see 2.5) —
+   the live context never sets it, so the guard would still never trigger.
+
+**Fix:**
+1. Rename `src/proxy.ts` → `src/middleware.ts`.
+2. Rename the exported function `proxy` → `middleware`.
+3. Make sure the cookie-setting logic lands in the live
+   `src/context/AuthContext.tsx` as part of fixing 2.5.
+
+---
+
+### 2.7 Two parallel, inconsistent user-registration paths
+- `src/app/api/auth/register/route.ts` hashes passwords with `bcryptjs` and
+  writes users directly to Firestore via `createUser()` in
+  `src/lib/firebase.ts`.
+- `src/app/(auth)/signup/signup-form.tsx` never calls this API. It signs up
+  directly via the Firebase client SDK (`createUserWithEmailAndPassword`) and
+  writes its own separate Firestore user doc.
+
+These are two entirely separate registration flows that will produce
+different Firestore document shapes (one has a `password` field, one
+doesn't) and use different auth systems entirely.
+
+**Fix:** Pick one registration path — Firebase Auth (client SDK) is already
+wired up elsewhere in the app and is the natural choice. Delete
+`src/app/api/auth/register/route.ts` and the `bcryptjs`/`@types/bcryptjs`
+dependency from `package.json`, unless there's a specific reason you need a
+server-side registration API (in which case, make `signup-form.tsx` call it
+instead of hitting Firebase client SDK directly).
+
+---
+
+### 2.8 Firestore security rules don't match actual document fields
+`firestore.rules` catch-all block requires:
+```
+resource.data.ownerId == request.auth.uid
+```
+for read/write on all collections. But actual documents use different owner
+fields depending on collection: `employerId`, `swiperId`, `candidateId`, etc.
+— not `ownerId`. Any direct client-side Firestore access (bypassing the admin
+SDK, which ignores these rules) will fail almost every read/write.
+
+**Fix:** Rewrite `firestore.rules` with collection-specific match blocks that
+check the correct field per collection (e.g., `swipes` → `swiperId`, `jobs` →
+`employerId`, `matches` → `candidateId` or `employerId`, etc.), rather than
+one generic catch-all assuming a uniform `ownerId` field.
+
+---
+
+## GROUP 3 — Structural cleanup / duplication
+
+Delete or consolidate the following duplicate/orphaned files:
+
+| Keep | Remove / merge from |
+|---|---|
+| `src/context/AuthContext.tsx` | `AuthContext.tsx` (root) — merge missing methods first, see 2.5 |
+| `src/app/user.ts` | `user.ts` (root) — identical, unused duplicate |
+| `src/app/tinda.ts` | `tinda.ts` (root) — identical, unused duplicate |
+| One `next.config.*` | see 1.4 |
+| — | `src/lib/db.ts` — empty, unreferenced anywhere |
+| — | `src/lib/user-types.ts` — empty, unreferenced anywhere |
+| — | `src/app/api/auth/[...nextauth]/route.ts` — dead NextAuth stub, see 1.1 |
+
+Also remove now-unused dependencies from `package.json` once the above is
+cleaned up: `next-auth`, `bcryptjs`, `@types/bcryptjs` (confirm nothing else
+depends on them first).
+
+---
+
+## GROUP 4 — Lower priority / stubbed features (flag, don't necessarily block)
+
+- `src/app/(auth)/forgot-password/page.tsx` doesn't actually call Firebase's
+  `sendPasswordResetEmail` — it just `setTimeout`s and shows a fake success
+  message. Wire it up to real Firebase Auth password reset.
+- `src/app/(auth)/verify-email/verify-email-form.tsx` fakes verification with
+  a hardcoded `"valid-token"` check and a `setTimeout`. No real backend call.
+  Either wire this to Firebase's actual email verification flow or remove the
+  page if unverified email isn't currently being enforced.
+- `scripts/generate-apple-client-secret.mjs` and the `APPLE_*` env vars in
+  `src/lib/env.ts` appear to be leftovers from before the Firebase migration
+  — Apple sign-in isn't wired up anywhere else in the app. Confirm whether
+  it's still needed; remove if not.
+
+---
+
+## Verification checklist for the agent
+
+After making these fixes, confirm:
+1. `npx tsc --noEmit` passes with no errors (this will catch any remaining
+   `UserType.X` / `auth()` call-site issues).
+2. Grep the repo for `UserType\.` and confirm every usage now resolves against
+   a real enum.
+3. Grep for `await auth()` and confirm `src/lib/auth.ts` actually exports a
+   callable `auth` function matching that call signature.
+4. Grep for `@/lib/validations` and confirm the file exists and exports the
+   expected schemas.
+5. Confirm only one `next.config.*` file exists.
+6. Sign up as a Candidate and as an Employer, and confirm each shows up
+   correctly in the other's swipe feed (validates fix 2.1).
+7. Confirm `/employer/jobs` only shows jobs owned by the logged-in employer
+   (validates fixes 2.2 and 2.3).
+8. Confirm visiting `/dashboard` while logged out redirects to `/login`
+   (validates fix 2.6).

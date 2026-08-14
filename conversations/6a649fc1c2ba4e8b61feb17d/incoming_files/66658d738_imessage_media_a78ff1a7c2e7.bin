@@ -1,0 +1,123 @@
+# GODMODE-AI — Omega Prompt (Final Build-Out)
+
+Paste this whole document into Claude Code inside the `GODMODE-AI` repo root. Everything below was verified by reading the actual current code, not assumed from the README. Work top to bottom — security items first, then the DB cleanup, then the remaining architecture gaps.
+
+---
+
+## Important correction before you start
+
+**The database is already Firebase/Firestore.** `utils/memory.py`, `utils/skills.py`, `utils/context.py`, and `utils/reflector.py` all read/write through `get_db()` → Firestore. There is no live Redis client anywhere in the Python code. What's actually true is: **the migration is done in code but not finished in config and docs**, which is a real and separate problem — see Task 2. Don't re-architect storage; just finish cleaning up the trail Redis left behind.
+
+---
+
+## PART A — Security (do these first, this bot is internet-facing)
+
+### Task 1 — The code_runner sandbox is not actually a sandbox
+
+**Problem:** `skills/code_runner/run.py` blocks tool use by checking whether banned *substrings* (`"import os"`, `"eval("`, `"__import__"`, etc.) appear in the submitted code, then runs the rest through plain `exec()` with a trimmed builtins dict. This is a well-known, trivially defeated pattern. Python's object model lets you reach dangerous functionality without ever typing a blocked substring — for example, walking `().__class__.__base__.__subclasses__()` to find a loaded class that exposes `__builtins__` or subprocess access, with no `import`, `eval(`, or `exec(` token anywhere in the source. Restricting `__builtins__` alone does not stop this, because the *objects already loaded in the process* are reachable through any object's `__class__` chain regardless of what's in the builtins dict.
+
+This is being exposed to any Telegram user who can message the bot and get routed into agent mode (a message containing "```" or starting with "run "/"execute "/"eval " triggers it). On Vercel this runs in the same process as your Firebase credentials and OpenRouter API key held in memory.
+
+**Fix — pick one, do not ship the current approach:**
+- **Preferred:** Don't execute arbitrary user Python in-process at all. Either drop `code_runner` as a general "run anything" skill and scope it down to a fixed, safe set of operations (e.g. it only evaluates whitelisted math/data-transform expressions, similar to how `calculator` already works safely), or
+- **If you need real code execution:** run it in an actually isolated environment — a separate sandboxed subprocess with no network, a restricted filesystem, a hard CPU/memory/time limit enforced by the OS (not just a character count check), and no shared Python process/module cache with the bot itself. On Vercel serverless this usually means calling out to a dedicated sandboxing service (e.g. a container-per-execution runner) rather than doing it locally — flag this as an infra decision the user needs to make, don't silently pick one.
+- Either way: remove the substring blocklist approach entirely once the real fix is in — it gives a false sense of security and should not remain as a second layer that looks load-bearing.
+
+**Verify:** Try the subclass-walk trick above (or any known Python sandbox-escape one-liner) against your fix and confirm it's actually blocked, not just harder to trigger.
+
+### Task 2 — Expose `delete_learned_skill()` to admins
+
+**Problem:** `utils/skills.py` already implements `delete_learned_skill(name)` correctly, but no command anywhere calls it. Given Task 5 (below) will make the learning loop fire more reliably, you have no way to remove a bad learned skill (wrong triggers, hallucinated instructions, a skill that shouldn't have been created) without touching Firestore by hand.
+
+**Fix:** Add `/forgetskill <name>` (admin-only, gate with `is_admin()` like the other admin commands) that calls `delete_learned_skill(name)` and confirms. Register it alongside the other admin `CommandHandler`s.
+
+**Verify:** Create a learned skill via the flow from the previous integration pass, delete it with `/forgetskill`, confirm `/skills` no longer lists it and `find_skills_for_message()` no longer matches its triggers.
+
+---
+
+## PART B — Finish the Firebase migration (config + docs, not code)
+
+### Task 3 — `vercel.json` still provisions Redis, not Firebase
+
+**Problem:** `vercel.json`'s `env` block declares `"REDIS_URL": "@redis_url"` and does **not** declare `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, or `FIREBASE_PRIVATE_KEY` — the three vars `utils/memory.py` actually reads to initialize Firestore. As configured, a fresh Vercel deploy either fails at the `vercel env add` step (no `redis_url` secret exists to reference) or succeeds while leaving Firebase completely unconfigured, meaning `get_db()` returns `None` and every memory/skills/reflector call silently no-ops.
+
+**Fix:** Replace the `REDIS_URL` line in `vercel.json`'s `env` block with the three Firebase vars, referencing Vercel secrets you'll create (e.g. `@firebase_project_id`, `@firebase_client_email`, `@firebase_private_key`).
+
+**Verify:** Run through the full `vercel env add ...` sequence with the new variable names and confirm a clean deploy actually reaches Firestore (check `get_db()` doesn't return `None` in production logs on first message).
+
+### Task 4 — Sweep every remaining Redis reference
+
+**Problem:** These are stale/misleading, not functionally broken, but they'll actively confuse the next person (including future-you) working on this repo:
+- `README.md`: "Redis instance (recommended: Upstash free tier)" under Prerequisites, `vercel env add REDIS_URL` under Deploy, `Memory: Redis (Upstash)` under Tech Stack, `Redis` listed as the backing store for `memory_search`/`episodic_recall` in the skills table, and "Redis (28-day TTL, keyword search)" in the Memory System table.
+- `utils/admin.py`'s `/broadcast` command tells the admin the feature "requires a registered users list in Redis" — should say Firestore, or better, describe what's actually needed (a Firestore collection tracking active chat IDs) since that user-list feature doesn't exist yet either (see Task 7).
+
+**Fix:** Full-repo search for `Redis`/`redis`/`REDIS` and update every user-facing string and doc line to say Firestore/Firebase. `requirements.txt` is already correct (no `redis` package listed) — leave it.
+
+**Verify:** `grep -rn "redis\|Redis\|REDIS" .` from repo root should return nothing except intentional historical notes, if you choose to keep any (e.g. a CHANGELOG entry noting the migration) — everything else should be gone.
+
+---
+
+## PART C — Close the two bugs already known from the last integration pass
+
+### Task 5 — `record_usage()` is never called on agent-mode turns
+
+In `chat_handler`'s `if use_agent:` branch, no `record_usage()` call exists — it only happens in the `else` (direct mode) branch. Every agentic turn is invisible to `/status`, the admin dashboard, and daily/rate-limit-adjacent stats, despite costing real OpenRouter tokens (often more than direct mode, since it can run multiple LLM calls per turn). Add a `record_usage()` call at the end of the agent branch. Since `agent_meta` doesn't carry a clean token count, either sum a rough estimate across iterations (`len(response)//4` per LLM call, tracked in `AgentState`) or record with `tokens=0` and `msg_type="agent"` so at least message counts and rate limiting stay accurate — pick whichever the user prefers, but don't leave it uncounted.
+
+### Task 6 — `should_use_agent()` triggers are too loose
+
+`AGENT_TRIGGERS` includes bare words like `"code"`, `"plan"`, `"compare"`, `"analyze"`, `"the current"`, `"what's the"` — these will catch a lot of plain conversation that needs no tool ("what's the deal with...", "help me plan my week", "compare these two ideas"), pushing it through the slower, more expensive multi-call agent loop for nothing. Tighten the trigger list to require tool-shaped phrasing (verb + object pairs like "weather in", "calculate", a detected URL, a detected math expression) rather than single loose keywords. Add a log line recording `should_use_agent()`'s decision vs. whether a tool actually got called on that turn, so you can see false-positive rate in production and keep tuning it with real data instead of guessing.
+
+---
+
+## PART D — Architecture gaps: what OpenClaw/Hermes-style agents have that this doesn't yet
+
+These are bigger, real gaps between what's built and what the architecture your own README describes actually implies at full maturity. Do them in this order — each builds on the last.
+
+### Task 7 — Replace text-parsed tool calls with native function-calling
+
+**Problem:** Tool calls currently work by asking the model to emit a `[TOOL_CALL]{"tool": ..., "args": {...}}[/TOOL_CALL]` block in free text, which `parse_tool_call()` then regexes out. This is fragile — a model can format it slightly wrong, wrap it in markdown fences, or emit prose before/after that confuses the parser — and it's not how OpenRouter/most modern model APIs are meant to be used for tool calling.
+
+**Fix:** Switch to OpenRouter's native `tools` parameter (OpenAI-compatible function-calling schema) — most models routed through OpenRouter support it. Convert each `Skill`'s frontmatter (name, description, arguments) into a JSON-schema `tools` entry at request time in `context.build_context()` / `agent.py`'s request payload, and read `response.choices[0].message.tool_calls` instead of regexing the text. This removes an entire class of parsing failures and is the single highest-leverage change in this list. Keep the `[TOOL_CALL]` text format as a fallback parse path for models that don't support native tool calling, but make native calling the default.
+
+**Verify:** Run the same multi-tool trace from the previous pass and confirm tool calls now arrive via `message.tool_calls` rather than being regexed from `message.content`, and that a deliberately malformed model response (ask a weaker/free model to reduce reliability) fails more gracefully than before.
+
+### Task 8 — Upgrade episodic memory from keyword overlap to semantic search
+
+**Problem:** `search_episodic()` in `utils/memory.py` does pure keyword-set overlap (`query_words & episode_words`) against the last 50 Firestore docs. This misses paraphrased or semantically related past interactions — a genuinely Hermes-style recall system needs embedding-based similarity, not literal word overlap.
+
+**Fix:** At `store_episode()` time, generate an embedding of `query + summary` (OpenRouter/OpenAI-compatible embeddings endpoint, or any embedding model available through your existing OpenRouter key) and store the vector alongside the Firestore doc. At `search_episodic()` time, embed the incoming query and rank stored episodes by cosine similarity instead of word-set overlap. Firestore doesn't do native vector search at small scale without extensions, so for the current data volume (fetch-50-and-filter is already the existing pattern) it's fine to keep fetching a batch and ranking in Python — just rank by embedding similarity instead of word overlap. Note the added latency/cost per stored episode and per search (one embedding call each) and decide with the user whether that trade-off is worth it now vs. deferred.
+
+**Verify:** Store two episodes that are semantically related but share few literal words (e.g. "how do I convert celsius to fahrenheit" and "temperature unit conversion help") and confirm the second surfaces the first in `search_episodic_memory()` results — the current keyword approach would miss this.
+
+### Task 9 — Multi-agent orchestration (explicitly deferred in your own README)
+
+**Problem:** The agent loop is single-agent by design right now (`README.md` line 50: "single agent (multi-agent is future)"). A fuller OpenClaw-style gateway supports delegating sub-tasks to specialized sub-agents (e.g. a research sub-agent that itself loops through several tool calls and returns a synthesized result to the orchestrating agent) rather than one flat loop handling everything.
+
+**Fix (scope this as its own follow-up, don't rush it into this pass):** Add a `sub_agent` skill type — a skill whose `run()` doesn't call an external API but instead spins up a new `Agent.run()` instance with a narrower system prompt and its own tool subset, returning a synthesized text result to the parent loop like any other tool result. Cap sub-agent depth at 1 level (no sub-agents spawning sub-agents) to keep iteration/time budgets sane under Vercel's 60s limit. This is the biggest single feature gap in the list — treat it as a distinct project phase after Tasks 1–8 are stable, not something to bolt on quickly.
+
+### Task 10 — No tests exist anywhere in the repo
+
+**Problem:** There is no test file anywhere in the codebase. Every verification so far (in this pass and the last) has been manual live-message tracing, which doesn't scale and won't catch regressions as this grows (especially once Task 7's function-calling migration and Task 9's sub-agents land).
+
+**Fix:** Add a `tests/` directory with, at minimum: unit tests for `parse_tool_call()` / the new native-tool-call parsing from Task 7, `find_skills_for_message()` trigger matching, `should_use_agent()`'s routing decisions (a table of sample messages → expected True/False, updated as Task 6 tunes it), and `reflect_on_task()`'s JSON-parsing/skill-creation logic with a mocked `send_message()`. Full end-to-end tests against live Telegram/OpenRouter/Firestore aren't practical to automate cheaply — keep those as the manual trace checklist from the previous pass, but everything that's pure logic (parsing, routing, formatting) should have real unit coverage.
+
+### Task 11 — No observability across agent iterations
+
+**Problem:** Logging exists (`logger.info`/`logger.error` throughout) but there's no way to trace a single user request across its full lifecycle — which iterations happened, which skills fired, what the reflector decided, all correlated to one request — without manually grepping timestamps. As Task 9 adds sub-agents this gets much harder to debug without structure.
+
+**Fix:** Generate a short request ID (e.g. `chat_id + timestamp` hash) at the top of `chat_handler`, thread it through `Agent.run()`, `AgentState`, and the reflector calls, and include it in every log line for that request (`logger.info(f"[{request_id}] ...")`). This is cheap to add now and expensive to retrofit later once sub-agents exist.
+
+---
+
+## Do-last checklist
+
+After all of the above, run the full trace one more time end to end:
+1. Cold start → plain message → SOUL tone present, no agent path, usage recorded.
+2. Single-tool message → one skill fires via native function-calling (Task 7), usage recorded (Task 5), no reflection.
+3. Multi-tool message → reflection fires, learned skill created, `consolidate_memory` writes, episode stored with an embedding (Task 8).
+4. Repeat a semantically similar (not identical) request → confirm the learned skill *and* the semantically related episode both surface.
+5. `/forgetskill` removes the learned skill cleanly (Task 2).
+6. Deliberately try the code_runner sandbox-escape pattern from Task 1 and confirm it's actually blocked.
+7. Fresh `vercel --prod` deploy from a clean environment using the corrected `vercel.json` (Task 3) — confirm Firestore connects on first real message, not just in local dev.
+
+That's the full remaining distance from "correctly integrated" (where the last pass left it) to "actually matches what a complete OpenClaw-gateway + Hermes-learning-loop system implies" — security-hardened, fully on Firebase with no stale trail, native tool-calling, semantic memory, and enough test/observability scaffolding that the next feature (multi-agent) can be built without flying blind.

@@ -1,0 +1,6 @@
+{
+  "title": "Fix all bugs: unify Firebase auth, fix Firestore layer, add dashboard",
+  "head": "fix/all-bugs",
+  "base": "main",
+  "body": "Complete rewrite of the broken pieces + all bug fixes identified in the audit.\n\nCritical fixes:\n- Created src/lib/firebase.ts (the entire Firestore CRUD layer was missing)\n- Fixed UserType (was a type alias, now a real enum)\n- Fixed auth() (was an object, now verifies Firebase ID tokens)\n- Fixed AuthProvider (was next-auth SessionProvider, now Firebase)\n- Renamed proxy.ts to middleware.ts\n\nSilent matching bugs fixed:\n- listJobs() was ignoring its filter\n- listCandidateUsers() queried lowercase 'candidate' but data stored as 'Candidate'\n- listSwipesBySwiper() dropped the doc id\n- Swipe route read employerProfile.userId (never written)\n\nMade functional (were mocked):\n- Forgot password - real sendPasswordResetEmail\n- Email verification - real applyActionCode\n\nNew pages:\n- /dashboard with role-based views + Google user onboarding\n- /employer/swipe\n\nCleanup:\n- Removed .env from public repo (rotate credentials now)\n- Removed all NextAuth\n- Deleted orphan files\n- Merged duplicate next.config\n- Rewrote firestore.rules\n\nSee MIGRATION_NOTES.md for full details."
+}

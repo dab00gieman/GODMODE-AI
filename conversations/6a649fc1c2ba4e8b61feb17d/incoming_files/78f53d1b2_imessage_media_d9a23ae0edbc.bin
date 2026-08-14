@@ -1,0 +1,165 @@
+
+Do all this next :
+# GODMODE-AI — Full Integration & Fix Prompt
+
+Paste this whole document into Claude Code (or hand it to whichever coding agent/dev you're using) inside the `GODMODE-AI` repo root. It is written as a complete task brief, not a summary — it tells the agent exactly what's broken, what's disconnected, and what "done" looks like.
+
+---
+
+## Context
+
+This repo (`GODMODE-AI`) is a Telegram bot built on OpenRouter. The README claims a "4-layer OpenClaw/Hermes-inspired agentic architecture" (Gateway → Execution → Integration → Intelligence), with a SOUL.md cognitive anchor, an auto-discovered skills system, a ReAct agent loop, and a Hermes-style reflective learning loop that writes new skills to Redis.
+
+**None of that is currently wired together.** The individual pieces are well-written in isolation, but the live code path (`api/webhook.py` → `chat_handler`) bypasses all of it and does a plain `send_message()` call with raw history. This prompt's job is to make the documented architecture real: one continuous path from a Telegram message → SOUL-anchored context → skill-using agent loop → reflection/learning → back to the user.
+
+Work through the tasks in order. Each task says what's wrong, where, and what correct looks like. Do not skip verification steps — each task ends with how to prove it works.
+
+---
+
+## Task 1 — Fix the broken import in `utils/agent.py`
+
+**Problem:** `utils/agent.py` does:
+```python
+from utils.tools import get_tools_description
+...
+from utils.tools import execute_tool, parse_tool_call
+```
+`utils/tools.py` does not exist anywhere in this repo. The equivalent functions live in `utils/skills.py` under different names:
+- `get_tools_description` → use `get_skills_prompt_section()` for the short list, or `get_full_skills_context()` for full instructions (Hermes-style injection). Agent should use the full context, since the whole point of the SKILL.md system is that the LLM sees complete instructions, not just a one-liner.
+- `execute_tool(name, args)` → `execute_skill(name, args)` in `utils/skills.py` (same signature shape, keyword name differs — check it).
+- `parse_tool_call` → already exists correctly in `utils/skills.py`, just import from the right place.
+
+**Fix:** Update both import lines in `AgentState.build_context()` and `Agent.run()` to import from `utils.skills` instead of `utils.tools`, using the correct function names above. Delete the dead reference entirely — do not create a `utils/tools.py` shim file; that just adds a second source of truth for tool definitions, which defeats the point of having one skill registry.
+
+**Verify:** `python -c "from utils.agent import Agent"` should import cleanly with no `ModuleNotFoundError`.
+
+---
+
+## Task 2 — Initialize the skill registry at startup
+
+**Problem:** `utils/skills.py` defines `initialize_skills()` (which calls `discover_bundled_skills()` + `load_learned_skills()`), but **nothing in the codebase calls it.** Right now `_REGISTRY` is always empty at runtime — even after Task 1's fix, the agent would have zero tools available.
+
+**Fix:** Call `initialize_skills()` once at process startup in `api/webhook.py`, before the handler registrations (or in the module-level init block that sets up the Telegram `Application`). On Vercel serverless, cold starts mean this needs to run on every fresh invocation, so don't gate it behind a "only once" flag that could survive across a stale import cache incorrectly — a plain module-level call at import time is fine and matches how `config.py`'s env loading already works.
+
+**Verify:** Add a temporary log line after `initialize_skills()` and confirm on a live invocation you see `Skill registry initialized: 10 skills (10 bundled, 0 learned)` (or however many bundled skills exist) in the logs.
+
+---
+
+## Task 3 — Wire `context.py` into the message handler
+
+**Problem:** `chat_handler` in `api/webhook.py` builds messages like this:
+```python
+history = get_session(chat_id)
+history.append({"role": "user", "content": user_message})
+response, usage = send_message(model=model, messages=history, ...)
+```
+This sends raw history with no system prompt at all. `utils/context.py` already implements the full assembly (SOUL.md + IDENTITY.md + USER.md + skills + MEMORY.md + episodic recall + token budgeting) via `build_context(chat_id, history, user_message)` — it is simply never called.
+
+**Fix:** In `chat_handler`, replace the raw `messages=history` construction with:
+```python
+from utils.context import build_context
+messages = build_context(chat_id, history, user_message)
+response, usage = send_message(model=model, messages=messages, temperature=temperature, max_tokens=max_tokens)
+```
+Note `build_context` already appends history internally after building the system prompt — check its signature and don't double-append the user message that's already in `history`.
+
+**Verify:** Temporarily log `messages[0]['content'][:300]` before the `send_message` call and confirm it starts with actual SOUL.md content, not a blank/default string. Send a real message and confirm the bot's tone/behavior reflects whatever is in `soul/SOUL.md`.
+
+---
+
+## Task 4 — Route agent-eligible messages through `Agent.run()`
+
+**Problem:** `agent.py` already defines `should_use_agent(message)` — a heuristic router that flags messages needing tools (weather, search, calculations, URLs, code). Nothing calls it. Every message, tool-needing or not, currently goes through the same direct `send_message()` path, so `web_search`, `weather`, `calculator`, etc. are all unreachable from the live bot no matter what the user asks.
+
+**Fix:** In `chat_handler`, after building `messages` (Task 3) but before deciding how to respond, check the user's preference and the router:
+```python
+from utils.agent import Agent, should_use_agent
+
+agent_pref = prefs.get("agent_enabled", True)  # decide sensible default
+if agent_pref and should_use_agent(user_message):
+    agent = Agent(model=model, temperature=temperature)
+    final_answer, metadata = agent.run(user_message, history, model=model)
+    response, usage = final_answer, {"total_tokens": None, "model_used": model}
+else:
+    response, usage = send_message(model=model, messages=messages, temperature=temperature, max_tokens=max_tokens)
+```
+Adjust `usage`/`metadata` handling so `record_usage()` further down doesn't break on missing keys — `Agent.run()` doesn't return token usage the same way `send_message()` does, so decide whether to estimate tokens from the response length or skip usage recording for agent-mode turns and note that as a known gap.
+
+Also: `Agent.run()` internally calls `state.build_context()`, which builds its OWN minimal system prompt (`AGENT_SYSTEM_PROMPT` + tools only) — it does NOT go through `context.py`'s SOUL/MEMORY/episodic assembly. Decide and implement one of:
+- (Preferred) Modify `AgentState.build_context()` to accept the already-built `messages` from `context.build_context()` as its history/system base, so agent-mode turns still get SOUL.md + memory, with the tool-call instructions layered on top instead of replacing them.
+- (Minimum viable) Leave `AgentState.build_context()` as its own thing for now, but log this as a known divergence — agentic turns currently lose SOUL/personality/memory context. This is not the end goal; only accept this if time-boxing forces it.
+
+**Verify:** Send "what's the weather in Lagos" and confirm in logs: `should_use_agent` returns `True`, `Agent.run()` executes, a `[TOOL_CALL]` for the `weather` skill fires, `execute_skill("weather", ...)` runs `skills/weather/run.py`, and the final Telegram reply contains real weather data, not a hallucinated guess.
+
+---
+
+## Task 5 — Call the reflector after agentic runs
+
+**Problem:** `utils/reflector.py` fully implements `reflect_on_task()` (decides whether a completed multi-tool task should become a learned skill, writes it via `create_learned_skill()`) and `consolidate_memory()` (appends a summary to `MEMORY.md`). Neither function is called from anywhere in the codebase. The "learning loop" described in the README doesn't run.
+
+**Fix:** After `Agent.run()` returns in Task 4's new branch, if `len(metadata["tools_used"]) >= 2` (matches `reflector.MIN_TOOLS_FOR_REFLECTION`), call:
+```python
+from utils.reflector import reflect_on_task, consolidate_memory
+from utils.context import store_episode
+
+reflect_on_task(
+    user_message=user_message,
+    tool_history=agent.state.tool_results if hasattr(agent, "state") else [],  # see note below
+    iterations=metadata["iterations"],
+    outcome=final_answer,
+    model=model,
+)
+consolidate_memory(user_message, final_answer, tool_history=...)
+store_episode(chat_id, query=user_message, summary=final_answer[:300], tools_used=metadata["tools_used"])
+```
+Note: `Agent.run()` currently builds `tool_results` on a local `AgentState` instance and doesn't expose it on `Agent` itself, nor does `metadata` include full `{tool, args, result}` dicts — only `tools_used` (names). Extend `Agent.run()`'s returned `metadata` to include the full `state.tool_results` list so the reflector has real args/results to reason about, not just names. This is a small, deliberate change to `agent.py`'s return value — make it and update the one caller (`chat_handler`) accordingly.
+
+Run reflection/consolidation **after** replying to the user (fire-and-forget or `asyncio.create_task`), not before — don't make the user wait on an extra LLM call for reflection before they see their answer. Given this is Vercel serverless (no persistent background worker), decide explicitly whether to (a) await it inline before the function returns (adds latency but guarantees it runs), or (b) skip reflection on serverless entirely and note it as a platform limitation. Pick (a) unless you have a reason not to — serverless functions die when the handler returns, so a detached background task will likely get killed before it finishes.
+
+**Verify:** Send a multi-tool request (e.g. "look up the weather in Tokyo and convert 20 celsius to fahrenheit" — should trigger `weather` then `calculator`). Confirm afterward: a new key `godmode:learned_skill:*` appears in Redis (or a log line explains why it declined to learn), and `godmode:MEMORY.md` in Redis has a new entry. Then send a semantically similar request again and confirm the learned skill appears in the next turn's `get_full_skills_context()` output.
+
+---
+
+## Task 6 — Register the missing bot commands
+
+**Problem:** The README documents `/agent`, `/tools`, `/memory`, and `/skills` as bot commands. `api/webhook.py` only registers `start, help, clear, model, models, status, settings, settemp, settokens, setmodel, reset, admin, broadcast, lookup, clearuser`. Those four are missing entirely — users can't inspect or control the parts of the system this whole integration effort is turning on.
+
+**Fix:** Implement and register:
+- `/agent` — toggles `prefs["agent_enabled"]` via `set_prefs(chat_id, agent_enabled=not current)`; reply confirming new state.
+- `/tools` — calls `utils.skills.list_skills()`, formats name + description + source badge (bundled vs learned) for the user.
+- `/skills` — same list but split into two sections (Bundled / Learned) since that distinction matters to the user watching the system learn.
+- `/memory` — calls `utils.context.read_memory_md()`, sends it back (paginate/truncate via `formatter.split_message` if long — it already exists for this purpose, check `utils/formatter.py`).
+
+Follow the existing pattern used by `settemp_command` / `status_command` for structure (async def, `update.message.reply_text(...)`, error handling), and add each with `app.add_handler(CommandHandler(...))` next to the existing handler block.
+
+**Verify:** Run all four commands in a live chat and confirm output matches: toggling `/agent` actually changes whether Task 4's routing fires on the next message; `/tools` and `/skills` output actually reflects `initialize_skills()`'s registry (including any learned skill from Task 5's test); `/memory` shows the entries Task 5 wrote.
+
+---
+
+## Task 7 — End-to-end trace and regression pass
+
+This is not optional cleanup — it's the actual definition of "done" for this integration.
+
+1. **Cold-start trace:** Deploy (or run locally against a real Redis + OpenRouter key), send a fresh `/start`, then a plain conversational message with no tool need ("how are you today"). Confirm: SOUL.md tone shows up, no agent/tool path fires, response is fast (no extra iteration overhead).
+2. **Single-tool trace:** Send a single-tool request ("what time is it in Berlin"). Confirm: agent path fires, exactly one skill executes, no reflection/learning attempt happens (below the 2-tool threshold), response returns the real tool output.
+3. **Multi-tool + learning trace:** Repeat Task 5's verification. Confirm a learned skill persists in Redis across a cold start (simulate by re-deploying or clearing local caches, not just re-running in the same process).
+4. **Learned-skill reuse trace:** After the learned skill exists, send a new but similar request and confirm via logs that the agent's system prompt now includes the learned skill (check `get_full_skills_context()` output) and that it's used instead of the LLM reasoning the tool sequence from scratch.
+5. **Regression check on existing commands:** Confirm `/model`, `/settemp`, `/status`, `/clear`, admin commands still work unchanged — this integration should not touch their code paths.
+6. **Failure-mode check:** Temporarily point `REDIS_URL` at nothing / kill Redis, and confirm the bot degrades gracefully — plain chat should still work even if memory/skills/learning can't persist (the existing `try/except` + `get_redis_client()` returning `None` patterns in `memory.py`/`skills.py`/`context.py` should already mostly handle this; verify they actually do end-to-end rather than assuming).
+
+Write up the trace results (logs or a short report) as the closing deliverable — that's the proof this is now an actual integrated OpenClaw-gateway + Hermes-learning-loop agent, not just four well-written files sitting next to a chat relay.
+
+---
+
+## Explicit non-goals for this pass
+
+To keep this scoped, do **not**:
+- Build multi-agent orchestration (README already marks this "future").
+- Replace the `[TOOL_CALL]` JSON-in-text parsing format with native OpenRouter function-calling — that's a real improvement but a separate, larger change; flag it as a followup instead.
+- Add new skills beyond the existing 10.
+- Change the Redis schema/key naming beyond what Task 5 strictly requires (adding tool_results to reflection input).
+
+The goal of this pass is exactly one thing: make the four layers the README already describes actually run, in order, on a real message, with the two broken/missing pieces (the `utils.tools` import and the never-called `initialize_skills()`) fixed along the way.
+
+
+And change the whole Database from Redis to Firebase. 
