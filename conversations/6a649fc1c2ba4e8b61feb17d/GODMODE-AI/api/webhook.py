@@ -74,7 +74,7 @@ logger = logging.getLogger(__name__)
 # Initialize skills at module load time — runs on every cold start.
 # This is correct for Vercel serverless: each fresh invocation needs the registry populated.
 from utils.skills import initialize_skills, list_skills, get_skills_prompt_section
-from utils.agent import Agent, should_use_agent, generate_request_id
+from utils.agent import Agent, should_use_agent, generate_request_id, MIN_TOOLS_FOR_LEARNING
 initialize_skills()
 logger.info(f"Skill registry initialized with {len(list_skills())} skills")
 
