@@ -38,6 +38,10 @@ from utils.config import (
     is_image_model,
     AGENT_CONFIG,
     get_godmode_prompt,
+    is_authorized,
+    get_authorized_ids,
+    add_authorized_user,
+    remove_authorized_user,
 )
 from utils.memory import (
     get_session,
@@ -49,6 +53,9 @@ from utils.memory import (
     record_usage,
     check_rate_limit,
     get_user_stats,
+    get_authorized_users,
+    add_authorized_user_db,
+    remove_authorized_user_db,
 )
 from utils.openrouter import send_message, generate_image, list_available_models
 from utils.formatter import split_message, sanitize_input, truncate_with_ellipsis
@@ -86,6 +93,63 @@ bot_app: Application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 _event_loop = None
 _bot_initialized = False
+_event_loop = None
+
+
+def _get_event_loop():
+    """Persistent event loop for serverless warm starts."""
+    global _event_loop
+    import asyncio as _aio
+    if _event_loop is None or _event_loop.is_closed():
+        _event_loop = _aio.new_event_loop()
+        _aio.set_event_loop(_event_loop)
+        _load_authorized_users()
+    return _event_loop
+
+
+def _load_authorized_users():
+    """Load authorized users from Firebase into in-memory cache."""
+    try:
+        db_users = get_authorized_users()
+        for uid in db_users:
+            add_authorized_user(uid)
+        logger.info(f"Loaded {len(db_users)} authorized users from Firebase")
+    except Exception as e:
+        logger.error(f"Failed to load authorized users: {e}")
+
+
+def _check_auth(update) -> bool:
+    """Check if user is authorized to use the bot."""
+    user_id = update.effective_user.id if update.effective_user else 0
+    if user_id in ADMIN_IDS:
+        return True
+    if user_id in get_authorized_ids():
+        return True
+    try:
+        for uid in get_authorized_users():
+            add_authorized_user(uid)
+        if user_id in get_authorized_ids():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+async def _send_unauthorized_message(update):
+    """Send access denied message to unauthorized users."""
+    user = update.effective_user
+    user_id = user.id if user else "unknown"
+    username = user.username if user and user.username else "N/A"
+    logger.warning(f"Unauthorized access: id={user_id} @={username}")
+    try:
+        await update.effective_chat.send_message(
+            "\U0001F6AB Access Denied\n\n"
+            "This bot is private and restricted to authorized users only.\n\n"
+            f"Your Telegram ID: {user_id}\n"
+            "Contact the admin to request access."
+        )
+    except Exception:
+        pass
 
 def _get_event_loop():
     """Get or create a persistent event loop for serverless warm starts.
