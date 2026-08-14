@@ -1139,7 +1139,7 @@ class handler(BaseHTTPRequestHandler):
         """Health check endpoint."""
         self._respond(200, {
             "status": "healthy",
-            "bot": "GODMODE-AI",
+            "bot": "Lisa",
             "models": len(MODELS),
             "admins": len(ADMIN_IDS),
             "agent_enabled": AGENT_CONFIG.enabled,
@@ -1147,6 +1147,8 @@ class handler(BaseHTTPRequestHandler):
             "skills_loaded": len(list_skills()),
             "learning_enabled": AGENT_CONFIG.learning_enabled,
             "native_function_calling": True,
+            "self_healing": bool(os.getenv("GITHUB_TOKEN")),
+            "google_images": bool(os.getenv("GOOGLE_API_KEY")),
             "timestamp": datetime.utcnow().isoformat(),
         })
 
