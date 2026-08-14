@@ -263,7 +263,7 @@ async def model_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     keyboard = _build_category_keyboard()
     await update.message.reply_text(
-        "📡 Select an engine category:",
+        "Lisa — Select an engine category:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -609,79 +609,111 @@ async def admin_clearuser(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ──────────────────────────── INLINE KEYBOARD ────────────────────────────
 
+async def _safe_edit(query, text, reply_markup=None, parse_mode=None):
+    """Edit message with fallback to sending a new message if edit fails."""
+    try:
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception as edit_err:
+        logger.warning(f"edit_message_text failed, trying reply: {edit_err}")
+        try:
+            await query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except Exception:
+            try:
+                await query.message.reply_text(text.replace("*", ""))
+            except Exception as e:
+                logger.error(f"Both edit and reply failed: {e}")
+
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all inline keyboard callbacks."""
-    query = update.callback_query
-    await query.answer()
-    chat_id = query.message.chat_id
-
-    if query.data == "clear":
-        clear_session(chat_id)
-        await query.edit_message_text("🗑️ History wiped. Start fresh.")
-        return
-
-    if query.data == "help":
-        help_text = (
-            "🔥 **GODMODE Help**\n\n"
-            "1. Choose a category → select a model\n"
-            "2. Send any message\n"
-            "3. GODMODE responds\n\n"
-            "**Commands:**\n"
-            "  /start — Main menu\n"
-            "  /model — Change engine\n"
-            "  /clear — Wipe history\n"
-            "  /status — View status\n"
-            "  /agent — Toggle agent mode\n"
-            "  /tools — List skills\n"
-            "  /help — Full guide\n"
-        )
-        await query.edit_message_text(help_text, parse_mode="Markdown")
-        return
-
-    if query.data and query.data.startswith("admin_"):
-        await handle_admin_callback(update, context)
-        return
-
-    if query.data.startswith("cat_"):
-        category_name = query.data[4:]
-        category_models = CATEGORIES.get(category_name, {})
-        if not category_models:
-            await query.edit_message_text("❌ No models in this category.")
+    try:
+        query = update.callback_query
+        if not query:
             return
-        keyboard = []
-        for model_id, model_str in category_models.items():
-            label = get_model_label(model_str)
-            keyboard.append([InlineKeyboardButton(f"🧠 {label}", callback_data=f"model_{model_id}")])
-        keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back")])
-        await query.edit_message_text(
-            f"📂 {category_name}\n\nSelect an engine:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
 
-    if query.data.startswith("model_"):
-        model_id = query.data[6:]
-        if model_id in MODELS:
-            model_str = MODELS[model_id]
-            set_prefs(chat_id, model=model_str)
-            context.user_data["model"] = model_str
-            label = get_model_label(model_str)
-            await query.edit_message_text(
-                f"✅ **Engine:** {label}\n\nSend me anything. Use /help for commands.",
-                parse_mode="Markdown",
+        try:
+            await query.answer()
+        except Exception as e:
+            logger.warning(f"query.answer() failed: {e}")
+
+        chat_id = query.message.chat_id if query.message else 0
+
+        if query.data == "clear":
+            clear_session(chat_id)
+            await _safe_edit(query, "🗑️ History wiped. Start fresh.")
+            return
+
+        if query.data == "help":
+            help_text = (
+                "🔥 Lisa Help\n\n"
+                "1. Choose a category → select a model\n"
+                "2. Send any message\n"
+                "3. Lisa responds\n\n"
+                "Commands:\n"
+                "  /start — Main menu\n"
+                "  /model — Change engine\n"
+                "  /clear — Wipe history\n"
+                "  /status — View status\n"
+                "  /agent — Toggle agent mode\n"
+                "  /tools — List skills\n"
+                "  /help — Full guide\n"
             )
-        else:
-            await query.edit_message_text("❌ Invalid model.")
-        return
+            await _safe_edit(query, help_text)
+            return
 
-    if query.data == "back":
-        keyboard = _build_category_keyboard()
-        await query.edit_message_text(
-            "🔥 **GODMODE**\n\nChoose a category:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
-        return
+        if query.data and query.data.startswith("admin_"):
+            await handle_admin_callback(update, context)
+            return
+
+        if query.data.startswith("cat_"):
+            category_name = query.data[4:]
+            category_models = CATEGORIES.get(category_name, {})
+            if not category_models:
+                await _safe_edit(query, "❌ No models in this category.")
+                return
+            keyboard = []
+            for model_id, model_str in category_models.items():
+                label = get_model_label(model_str)
+                keyboard.append([InlineKeyboardButton(f"🧠 {label}", callback_data=f"model_{model_id}")])
+            keyboard.append([InlineKeyboardButton("🔙 Back", callback_data="back")])
+            await _safe_edit(
+                query,
+                f"📂 {category_name}\n\nSelect an engine:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+        if query.data.startswith("model_"):
+            model_id = query.data[6:]
+            if model_id in MODELS:
+                model_str = MODELS[model_id]
+                set_prefs(chat_id, model=model_str)
+                context.user_data["model"] = model_str
+                label = get_model_label(model_str)
+                await _safe_edit(
+                    query,
+                    f"✅ Engine set: {label}\n\nSend me anything. Use /help for commands.",
+                )
+            else:
+                await _safe_edit(query, "❌ Invalid model.")
+            return
+
+        if query.data == "back":
+            keyboard = _build_category_keyboard()
+            await _safe_edit(
+                query,
+                "🔥 Lisa\n\nChoose a category:",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+            return
+
+    except Exception as e:
+        logger.error(f"button_handler error: {e}", exc_info=True)
+        try:
+            query = update.callback_query
+            await query.message.reply_text(f"⚠️ Error selecting model: {str(e)[:100]}")
+        except Exception:
+            pass
 
 
 # ──────────────────────────── MESSAGE HANDLER (Tasks 5, 11) ────────────────────────────
