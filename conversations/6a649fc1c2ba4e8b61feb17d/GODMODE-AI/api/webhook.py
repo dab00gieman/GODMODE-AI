@@ -82,6 +82,22 @@ logger.info(f"Skill registry initialized with {len(list_skills())} skills")
 
 bot_app: Application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
+# ──────────────────────────── SERVERLESS INIT ────────────────────────────
+
+_bot_initialized = False
+
+def _ensure_bot_initialized():
+    """Initialize the bot app for serverless (required by PTB v21+)."""
+    global _bot_initialized
+    if not _bot_initialized:
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(bot_app.initialize())
+            _bot_initialized = True
+            logger.info("Bot app initialized for serverless")
+        finally:
+            loop.close()
+
 
 # ──────────────────────────── COMMANDS ────────────────────────────
 
@@ -843,6 +859,10 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             data = json.loads(body)
+            
+            # PTB v21+ requires initialize() before process_update()
+            _ensure_bot_initialized()
+            
             update = Update.de_json(data, bot_app.bot)
 
             loop = asyncio.new_event_loop()
