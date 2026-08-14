@@ -771,11 +771,12 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Log errors with context."""
-    logger.error(f"Exception: {context.error}", exc_info=True)
+    err_str = str(context.error)
+    logger.error(f"Exception: {err_str}", exc_info=True)
     if update and isinstance(update, Update) and update.effective_chat:
         try:
             await update.effective_chat.send_message(
-                "⚠️ Something went wrong. Try /clear and resend."
+                f"⚠️ Error: {err_str[:300]}\n\nTry /clear and resend."
             )
         except Exception:
             pass
