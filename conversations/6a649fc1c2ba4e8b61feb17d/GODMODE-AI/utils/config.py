@@ -204,7 +204,7 @@ CATEGORIES: Dict[str, Dict[str, str]] = {
 
 IMAGE_MODEL_IDS = {MODELS[k] for k in ("i1", "i2", "i3")}
 
-DEFAULT_MODEL = MODELS["g1"]  # Gemini 3 Flash — fast + high quality
+DEFAULT_MODEL = MODELS["g2"]  # Gemini 2.5 Flash — fast + high quality
 
 def get_system_prompt(model: str) -> str:
     """Return the best system prompt for the given model."""
