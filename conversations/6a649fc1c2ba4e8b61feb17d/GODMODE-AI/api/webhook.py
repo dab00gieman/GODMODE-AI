@@ -752,15 +752,16 @@ async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Check if image model
     is_img = is_image_model(model)
 
-    # Rate limiting
-    rate = check_rate_limit(chat_id, is_image=is_img)
-    if not rate["allowed"]:
-        reset_mins = rate["reset_in"] // 60
-        await update.message.reply_text(
-            f"⏳ Rate limit reached. Try again in ~{reset_mins} minutes.\n"
-            f"Daily limit: {RATE_LIMIT.max_messages} messages, {RATE_LIMIT.image_max} images."
-        )
-        return
+    # Rate limiting — admins bypass all limits
+    if not is_admin(user.id):
+        rate = check_rate_limit(chat_id, is_image=is_img)
+        if not rate["allowed"]:
+            reset_mins = rate["reset_in"] // 60
+            await update.message.reply_text(
+                f"⏳ Rate limit reached. Try again in ~{reset_mins} minutes.\n"
+                f"Daily limit: {RATE_LIMIT.max_messages} messages, {RATE_LIMIT.image_max} images."
+            )
+            return
 
     # Send typing indicator
     await update.message.chat.send_action(action="typing")
