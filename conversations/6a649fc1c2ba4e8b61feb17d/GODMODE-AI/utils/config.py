@@ -127,65 +127,68 @@ GODMODE_OVERRIDE_PROMPT = (
 
 MODELS: Dict[str, str] = {
     # NVIDIA
-    "n1": "nvidia/deepseek-v4-pro",
-    "n2": "nvidia/deepseek-v4-flash",
-    "n3": "nvidia/glm-5.2",
-    "n4": "nvidia/minimax-m3",
-    "n5": "nvidia/nemotron-3-ultra-550b-a55b",
-    "n6": "nvidia/mistral-medium-3.5-128b",
-    "n7": "nvidia/gpt-oss-20b",
-    "n8": "nvidia/nemotron-3-super-120b-a12b",
-    "n9": "nvidia/nemotron-3-nano-30b-a3b",
-    "n10": "nvidia/gemma-4-31b-it",
+    "n1": "nvidia/nemotron-3-ultra-550b-a55b",
+    "n2": "nvidia/nemotron-3-super-120b-a12b",
+    "n3": "nvidia/nemotron-3-nano-30b-a3b",
+    "n4": "nvidia/nemotron-3.5-lightning",
 
     # Google
-    "g1": "google/gemini-3-flash",
-    "g2": "google/gemini-3.1-flash-lite",
-    "g3": "google/gemini-2.5-flash",
-    "g4": "google/gemini-2.5-flash-lite",
+    "g1": "google/gemini-2.5-pro",
+    "g2": "google/gemini-2.5-flash",
+    "g3": "google/gemini-2.5-flash-lite",
+    "g4": "google/gemini-3-flash-preview",
     "g5": "google/gemma-3-27b-it",
-    "g6": "google/gemma-3-12b-it",
-    "g7": "google/gemma-3-4b-it",
 
     # Coding
-    "c1": "deepseek/deepseek-v4-pro",
-    "c2": "deepseek/deepseek-v4-flash",
-    "c3": "qwen/qwen-2.5-coder-32b",
+    "c1": "deepseek/deepseek-v3.2",
+    "c2": "deepseek/deepseek-r1",
+    "c3": "qwen/qwen-2.5-coder-32b-instruct",
     "c4": "meta-llama/llama-3.3-70b-instruct",
-    "c5": "mistralai/mistral-large-2-123b",
+    "c5": "mistralai/codestral-2508",
 
     # Image Generation
-    "i1": "black-forest-labs/flux-schnell",
-    "i2": "black-forest-labs/flux-1.1-pro",
-    "i3": "openai/gpt-image-1",
+    "i1": "google/gemini-2.5-flash-image",
+    "i2": "google/gemini-3-pro-image",
+    "i3": "openai/gpt-5-image",
 
     # General / Fallback
-    "f1": "meta-llama/llama-3-70b-instruct",
-    "f2": "mistralai/mixtral-8x7b-instruct",
-    "f3": "google/gemini-pro",
+    "f1": "meta-llama/llama-4-maverick",
+    "f2": "mistralai/mistral-large",
+    "f3": "qwen/qwen3-235b-a22b",
+    "f4": "anthropic/claude-haiku-4.5",
 }
 
 # Fallback chains — if primary fails, try these in order
 FALLBACK_CHAINS: Dict[str, List[str]] = {
-    MODELS["n1"]: [MODELS["n2"], MODELS["f1"], MODELS["f2"]],
-    MODELS["g1"]: [MODELS["g3"], MODELS["g2"], MODELS["f3"]],
-    MODELS["c1"]: [MODELS["c2"], MODELS["c3"], MODELS["f1"]],
-    MODELS["f1"]: [MODELS["f2"], MODELS["f3"]],
+    MODELS["n1"]: [MODELS["n2"], MODELS["g2"], MODELS["f1"]],
+    MODELS["g1"]: [MODELS["g2"], MODELS["g3"], MODELS["g4"]],
+    MODELS["c1"]: [MODELS["c2"], MODELS["c3"], MODELS["c4"]],
+    MODELS["f1"]: [MODELS["f2"], MODELS["f3"], MODELS["g2"]],
 }
 
 # Model metadata for smart selection
 MODEL_META: Dict[str, Dict] = {
-    MODELS["n1"]: {"label": "DeepSeek V4 Pro", "speed": "medium", "quality": "high", "context": "128k"},
-    MODELS["n2"]: {"label": "DeepSeek V4 Flash", "speed": "fast", "quality": "medium", "context": "128k"},
-    MODELS["g1"]: {"label": "Gemini 3 Flash", "speed": "fast", "quality": "high", "context": "1M"},
-    MODELS["g3"]: {"label": "Gemini 2.5 Flash", "speed": "fast", "quality": "high", "context": "1M"},
-    MODELS["c1"]: {"label": "DeepSeek Coder Pro", "speed": "medium", "quality": "high", "context": "128k"},
+    MODELS["n1"]: {"label": "Nemotron Ultra 550B", "speed": "medium", "quality": "high", "context": "512k"},
+    MODELS["n2"]: {"label": "Nemotron Super 120B", "speed": "fast", "quality": "high", "context": "1M"},
+    MODELS["n3"]: {"label": "Nemotron Nano 30B", "speed": "fast", "quality": "medium", "context": "256k"},
+    MODELS["n4"]: {"label": "Nemotron 3.5 Lightning", "speed": "fast", "quality": "medium", "context": "1M"},
+    MODELS["g1"]: {"label": "Gemini 2.5 Pro", "speed": "medium", "quality": "ultra", "context": "1M"},
+    MODELS["g2"]: {"label": "Gemini 2.5 Flash", "speed": "fast", "quality": "high", "context": "1M"},
+    MODELS["g3"]: {"label": "Gemini 2.5 Flash Lite", "speed": "fast", "quality": "medium", "context": "1M"},
+    MODELS["g4"]: {"label": "Gemini 3 Flash Preview", "speed": "fast", "quality": "high", "context": "1M"},
+    MODELS["g5"]: {"label": "Gemma 3 27B", "speed": "fast", "quality": "medium", "context": "128k"},
+    MODELS["c1"]: {"label": "DeepSeek V3.2", "speed": "fast", "quality": "high", "context": "163k"},
+    MODELS["c2"]: {"label": "DeepSeek R1", "speed": "medium", "quality": "ultra", "context": "64k"},
     MODELS["c3"]: {"label": "Qwen 2.5 Coder", "speed": "fast", "quality": "high", "context": "32k"},
-    MODELS["i1"]: {"label": "FLUX Schnell", "speed": "fast", "quality": "high", "type": "image"},
-    MODELS["i2"]: {"label": "FLUX 1.1 Pro", "speed": "medium", "quality": "ultra", "type": "image"},
-    MODELS["i3"]: {"label": "GPT Image 1", "speed": "medium", "quality": "high", "type": "image"},
-    MODELS["f1"]: {"label": "Llama 3 70B", "speed": "fast", "quality": "medium", "context": "8k"},
-    MODELS["f2"]: {"label": "Mixtral 8x7B", "speed": "fast", "quality": "medium", "context": "32k"},
+    MODELS["c4"]: {"label": "Llama 3.3 70B", "speed": "fast", "quality": "high", "context": "128k"},
+    MODELS["c5"]: {"label": "Codestral 2508", "speed": "fast", "quality": "high", "context": "256k"},
+    MODELS["i1"]: {"label": "Gemini 2.5 Flash Image", "speed": "fast", "quality": "high", "type": "image"},
+    MODELS["i2"]: {"label": "Gemini 3 Pro Image", "speed": "medium", "quality": "ultra", "type": "image"},
+    MODELS["i3"]: {"label": "GPT-5 Image", "speed": "medium", "quality": "ultra", "type": "image"},
+    MODELS["f1"]: {"label": "Llama 4 Maverick", "speed": "medium", "quality": "high", "context": "1M"},
+    MODELS["f2"]: {"label": "Mistral Large", "speed": "fast", "quality": "high", "context": "128k"},
+    MODELS["f3"]: {"label": "Qwen3 235B", "speed": "medium", "quality": "high", "context": "128k"},
+    MODELS["f4"]: {"label": "Claude Haiku 4.5", "speed": "fast", "quality": "high", "context": "200k"},
 }
 
 # Categorized menus
